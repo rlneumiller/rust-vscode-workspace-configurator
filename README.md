@@ -84,6 +84,27 @@ The tool will:
 7. Generate a workspace filename based on the root directory name (e.g., `my-projects.code-workspace`).
 8. Write or update the workspace file in the specified root, creating a backup of any existing file with `.backup` appended and adding numeric suffixes (`.1`, `.2`, ...) if needed.
 
+## Workspace settings merging and precedence
+
+The tool can optionally merge a small JSON settings file into the generated VS Code workspace `settings` object.
+
+- Precedence:
+  - If the environment variable `OPEN_SPACE_MMO` is set to the string `"1"`, the tool will look for a user config at `~/.config/open_space_mmo_workspace_settings.json` and merge that file if present.
+  - Otherwise, the tool will look in the workspace root (the directory where the `.code-workspace` file will be written) for the first file whose filename ends with `workspace_settings.json` and merge that instead.
+
+- Merge behavior:
+  - The merge is non-destructive: if the generated workspace already contains a `settings` object, keys present in the existing `settings` are preserved and keys from the external settings file are only added when they do not already exist.
+  - If the existing `settings` value is present but is not a JSON object, it will be replaced by the external settings object.
+
+- Error handling and interactivity:
+  - If the external settings file exists but cannot be read or parsed as valid JSON, the tool will print the error and prompt the user:
+    "Continue generating workspace without these settings? (y/N): "
+    - If the user answers `y` or `yes` the tool continues and skips applying the external settings.
+    - Otherwise the tool aborts so you can fix the JSON and re-run.
+  - In non-interactive contexts (for example CI or scripts where stdin is not a TTY), the tool will abort immediately on unreadable or invalid JSON rather than silently continuing.
+
+This behaviour ensures that personal machine-level defaults (when `OPEN_SPACE_MMO=1`) take precedence when desired, while allowing per-workspace overrides when the environment variable is not set.
+
 ## Example output
 
 When run in a directory containing multiple Rust projects, you might see:

@@ -5,6 +5,8 @@ use std::fs;
 use regex::Regex;
 use std::error::Error;
 use serde::{Deserialize, Serialize};
+use serde_json;
+use atty::Stream;
 use pathdiff;
 
 /// The type of runnable target.
@@ -474,6 +476,46 @@ pub fn create_configuration(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use tempfile::tempdir;
+    use std::fs::File;
+    use std::io::Write;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn acquire_env_lock() -> MutexGuard<'static, ()> {
+        ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    // Helper to temporarily set environment variables and restore them on drop.
+    struct EnvRestore {
+        entries: Vec<(String, Option<String>)>,
+    }
+
+    impl EnvRestore {
+        fn new() -> Self { EnvRestore { entries: Vec::new() } }
+        fn set(&mut self, k: &str, v: &str) {
+            let prev = std::env::var(k).ok();
+            self.entries.push((k.to_string(), prev));
+            unsafe { std::env::set_var(k, v); }
+        }
+        fn remove(&mut self, k: &str) {
+            let prev = std::env::var(k).ok();
+            self.entries.push((k.to_string(), prev));
+            unsafe { std::env::remove_var(k); }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (k, prev) in self.entries.drain(..).rev() {
+                match prev {
+                    Some(val) => unsafe { std::env::set_var(&k, &val); },
+                    None => unsafe { std::env::remove_var(&k); },
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_create_configuration_basic() {
@@ -504,6 +546,131 @@ mod tests {
         assert!(args.contains(&"--features".to_string()));
         assert!(args.iter().any(|a| a.contains("--manifest-path") || a.contains("--target-dir") || a.contains("--package")));
         assert_eq!(cfg.cwd, "${workspaceFolder}".to_string());
+    }
+
+    #[test]
+    fn test_open_space_mmo_merge_from_file() {
+        // Create a temporary directory to act as the workspace root / output dir.
+        // Serialize environment-modifying tests to avoid races when cargo runs tests in parallel.
+        let _env_lock = acquire_env_lock();
+        let td = tempdir().expect("tempdir");
+        let root = td.path().to_path_buf();
+
+        // Write an external settings file that would be merged when OPEN_SPACE_MMO=1
+        let external = serde_json::json!({
+            "git.autoRepositoryDetection": false,
+            "git.ignoredRepositories": ["./bevy_0.17_2"],
+            "editor.inlayHints.enabled": "offUnlessPressed"
+        });
+
+        // Write the config into a fake HOME/.config/open_space_mmo_workspace_settings.json
+        let home_dir = td.path().join("home");
+        fs::create_dir_all(home_dir.join(".config")).expect("create home .config");
+        let config_path = home_dir.join(".config").join("open_space_mmo_workspace_settings.json");
+        let mut f = File::create(&config_path).expect("create config file");
+        f.write_all(serde_json::to_string_pretty(&external).unwrap().as_bytes()).expect("write config");
+
+        // Create a pre-existing workspace file that already contains one setting we expect to preserve.
+        let workspace_filename = generate_workspace_filename(&root);
+        let workspace_path = root.join(&workspace_filename);
+        let pre_existing = serde_json::json!({
+            "folders": [],
+            "settings": {
+                "git.autoRepositoryDetection": true
+            }
+        });
+        let mut wf = File::create(&workspace_path).expect("create workspace");
+        wf.write_all(serde_json::to_string_pretty(&pre_existing).unwrap().as_bytes()).expect("write workspace");
+
+        // Create a minimal runnable so the function produces launches/tasks.
+        let runnable = Runnable {
+            name: "pkg::bin".to_string(),
+            package: "pkg".to_string(),
+            package_manifest: root.join("Cargo.toml"),
+            runnable_type: RunnableType::Binary,
+            required_features: vec![],
+            project_path: root.clone(),
+        };
+
+        // Ensure there is a Cargo.toml (not strictly necessary but keeps paths realistic).
+        let _ = File::create(root.join("Cargo.toml")).expect("create cargo toml");
+
+    // Set HOME to point at our fake home and enable merging via OPEN_SPACE_MMO.
+    let mut env_guard = EnvRestore::new();
+    env_guard.set("HOME", home_dir.to_string_lossy().as_ref());
+    env_guard.set("OPEN_SPACE_MMO", "1");
+
+        // Run the writer which should merge external settings into the existing workspace file
+        let written = write_workspace_for_root(&root, &[runnable], &root).expect("write workspace");
+
+        // Load the written workspace and assert merging behavior.
+        let content = fs::read_to_string(written).expect("read written workspace");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse json");
+        let settings = parsed.get("settings").expect("settings present");
+
+        // Existing key should be preserved (true) and other keys added from external config
+        assert_eq!(settings.get("git.autoRepositoryDetection").and_then(|v| v.as_bool()), Some(true));
+        assert!(settings.get("git.ignoredRepositories").is_some());
+        assert_eq!(settings.get("editor.inlayHints.enabled").and_then(|v| v.as_str()), Some("offUnlessPressed"));
+    }
+
+    #[test]
+    fn test_no_env_no_workspace_settings_file() {
+        // Ensure OPEN_SPACE_MMO is not set and there are no workspace_settings.json files
+        // Serialize environment-modifying tests to avoid races when cargo runs tests in parallel.
+        let _env_lock = acquire_env_lock();
+        unsafe { std::env::remove_var("OPEN_SPACE_MMO"); }
+
+        let td = tempdir().expect("tempdir");
+        let root = td.path().to_path_buf();
+
+        // Create a pre-existing workspace file with a setting that should be preserved
+        let workspace_filename = generate_workspace_filename(&root);
+        let workspace_path = root.join(&workspace_filename);
+        let pre_existing = serde_json::json!({
+            "folders": [],
+            "settings": {
+                "git.autoRepositoryDetection": true
+            }
+        });
+        let mut wf = File::create(&workspace_path).expect("create workspace");
+        wf.write_all(serde_json::to_string_pretty(&pre_existing).unwrap().as_bytes()).expect("write workspace");
+
+        // Create a minimal runnable
+        let runnable = Runnable {
+            name: "pkg::bin".to_string(),
+            package: "pkg".to_string(),
+            package_manifest: root.join("Cargo.toml"),
+            runnable_type: RunnableType::Binary,
+            required_features: vec![],
+            project_path: root.clone(),
+        };
+
+    // Ensure there is a Cargo.toml
+    let _ = File::create(root.join("Cargo.toml")).expect("create cargo toml");
+
+    // Ensure HOME is a clean empty directory so no user config is picked up.
+    let home_dir = td.path().join("home_no_config");
+    fs::create_dir_all(&home_dir).expect("create fake home");
+    let mut env_guard = EnvRestore::new();
+    env_guard.set("HOME", home_dir.to_string_lossy().as_ref());
+    // Ensure OPEN_SPACE_MMO is not set
+    env_guard.remove("OPEN_SPACE_MMO");
+
+        // Do not create any *workspace_settings.json file in the root
+
+        // Run the writer
+        let written = write_workspace_for_root(&root, &[runnable], &root).expect("write workspace");
+
+        // Load and verify existing setting preserved and nothing new added
+        let content = fs::read_to_string(written).expect("read written workspace");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse json");
+        let settings = parsed.get("settings").expect("settings present");
+
+        // Existing key preserved
+        assert_eq!(settings.get("git.autoRepositoryDetection").and_then(|v| v.as_bool()), Some(true));
+        // No new keys were added
+        assert!(settings.get("editor.inlayHints.enabled").is_none());
     }
 }
 
@@ -746,6 +913,118 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
 
     let default_tasks = generate_default_tasks_internal(&project_paths, &name_map);
     workspace_file.tasks = Some(default_tasks);
+
+        // If the OPEN_SPACE_MMO environment variable is set to "1", look for and merge the
+        // ~/.config/open_space_mmo_workspace_settings.json settings into the workspace file. 
+        // We add only keys that do not already exist in the user's workspace settings so we
+        // don't overwrite existing preferences. This allows users to customize their
+        // existing preferences.
+        // Select a configuration file to merge. If OPEN_SPACE_MMO=1 is set we look
+        // for the user's home config at ~/.config/open_space_mmo_workspace_settings.json.
+        // Otherwise we look in the workspace `output_dir` for any filename that ends
+        // with `workspace_settings.json` and use the first match.
+        let use_home = std::env::var("OPEN_SPACE_MMO").map(|v| v == "1").unwrap_or(false);
+        let mut selected_config_path: Option<PathBuf> = None;
+        if use_home {
+            if let Ok(home) = std::env::var("HOME") {
+                let cfg = PathBuf::from(home).join(".config").join("open_space_mmo_workspace_settings.json");
+                if cfg.exists() {
+                    selected_config_path = Some(cfg);
+                }
+            }
+        } else {
+            // Look for a file in the workspace root that ends with `workspace_settings.json`.
+            if let Ok(entries) = fs::read_dir(output_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_file() {
+                        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                            if name.ends_with("workspace_settings.json") {
+                                selected_config_path = Some(p);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(config_path) = selected_config_path {
+                    match fs::read_to_string(&config_path) {
+                        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                            Ok(selected_val) => {
+                                if selected_val.is_object() {
+                                    if let Some(existing_settings) = workspace_file.settings.as_mut() {
+                                        if existing_settings.is_object() {
+                                            let existing_map = existing_settings.as_object_mut().unwrap();
+                                            for (k, v) in selected_val.as_object().unwrap().iter() {
+                                                if !existing_map.contains_key(k) {
+                                                    existing_map.insert(k.clone(), v.clone());
+                                                }
+                                            }
+                                        } else {
+                                            // Existing settings aren't an object; replace them with the external settings.
+                                            workspace_file.settings = Some(selected_val);
+                                        }
+                                    } else {
+                                        workspace_file.settings = Some(selected_val);
+                                    }
+                                }
+                            }
+                            Err(parse_err) => {
+                                eprintln!("Error: failed to parse {}: {}", config_path.display(), parse_err);
+                                // If stdin is not a TTY (non-interactive), abort instead of
+                                // silently continuing.
+                                if !atty::is(Stream::Stdin) {
+                                    return Err(format!("Aborted: {} is invalid JSON: {}", config_path.display(), parse_err).into());
+                                }
+                                // Prompt the user whether to continue without applying these settings.
+                                eprint!("Continue generating workspace without these settings? (y/N): ");
+                                use std::io::{self, Write};
+                                io::stdout().flush().ok();
+                                let mut input = String::new();
+                                match io::stdin().read_line(&mut input) {
+                                    Ok(_) => {
+                                        let ans = input.trim();
+                                        if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
+                                            eprintln!("Continuing without applying open_space_mmo settings.");
+                                        } else {
+                                            return Err(format!("Aborted by user due to invalid {}: {}", config_path.display(), parse_err).into());
+                                        }
+                                    }
+                                    Err(_) => {
+                                        // In interactive mode a read_line failure is unexpected;
+                                        // abort to be safe.
+                                        return Err(format!("Aborted: failed to read user input while handling invalid {}: {}", config_path.display(), parse_err).into());
+                                    }
+                                }
+                            }
+                        },
+                        Err(read_err) => {
+                            eprintln!("Error: failed to read {}: {}", config_path.display(), read_err);
+                            if !atty::is(Stream::Stdin) {
+                                return Err(format!("Aborted: could not read {}: {}", config_path.display(), read_err).into());
+                            }
+                            eprint!("Continue generating workspace without these settings? (y/N): ");
+                            use std::io::{self, Write};
+                            io::stdout().flush().ok();
+                            let mut input = String::new();
+                            match io::stdin().read_line(&mut input) {
+                                Ok(_) => {
+                                    let ans = input.trim();
+                                    if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
+                                        eprintln!("Continuing without applying open_space_mmo settings.");
+                                    } else {
+                                        return Err(format!("Aborted by user due to unreadable {}: {}", config_path.display(), read_err).into());
+                                    }
+                                }
+                                Err(_) => {
+                                    return Err(format!("Aborted: failed to read user input while handling unreadable {}: {}", config_path.display(), read_err).into());
+                                }
+                            }
+                        }
+                    }
+        }
 
     let json_content = serde_json::to_string_pretty(&workspace_file)?;
     fs::write(&workspace_path, json_content)?;
