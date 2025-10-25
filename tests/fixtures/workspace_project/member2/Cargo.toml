@@ -1,0 +1,8 @@
+[package]
+name = "member2"
+version = "0.1.0"
+edition = "2021"
+
+[[example]]
+name = "member2-example"
+path = "examples/example.rs"
