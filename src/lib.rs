@@ -646,16 +646,16 @@ mod tests {
             project_path: root.clone(),
         };
 
-    // Ensure there is a Cargo.toml
-    let _ = File::create(root.join("Cargo.toml")).expect("create cargo toml");
+        // Ensure there is a Cargo.toml
+        let _ = File::create(root.join("Cargo.toml")).expect("create cargo toml");
 
-    // Ensure HOME is a clean empty directory so no user config is picked up.
-    let home_dir = td.path().join("home_no_config");
-    fs::create_dir_all(&home_dir).expect("create fake home");
-    let mut env_guard = EnvRestore::new();
-    env_guard.set("HOME", home_dir.to_string_lossy().as_ref());
-    // Ensure OPEN_SPACE_MMO is not set
-    env_guard.remove("OPEN_SPACE_MMO");
+        // Ensure HOME is a clean empty directory so no user config is picked up.
+        let home_dir = td.path().join("home_no_config");
+        fs::create_dir_all(&home_dir).expect("create fake home");
+        let mut env_guard = EnvRestore::new();
+        env_guard.set("HOME", home_dir.to_string_lossy().as_ref());
+        // Ensure OPEN_SPACE_MMO is not set
+        env_guard.remove("OPEN_SPACE_MMO");
 
         // Do not create any *workspace_settings.json file in the root
 
@@ -671,6 +671,67 @@ mod tests {
         assert_eq!(settings.get("git.autoRepositoryDetection").and_then(|v| v.as_bool()), Some(true));
         // No new keys were added
         assert!(settings.get("editor.inlayHints.enabled").is_none());
+    }
+
+    #[test]
+    fn test_merge_from_workspace_file_with_settings_key() {
+        // Serialize environment-modifying tests to avoid races when cargo runs tests in parallel.
+        let _env_lock = acquire_env_lock();
+        let td = tempdir().expect("tempdir");
+        let root = td.path().to_path_buf();
+
+        // Write an external config that looks like a workspace file with a "settings" key
+        let external = serde_json::json!({
+            "folders": [],
+            "settings": {
+                "git.autoRepositoryDetection": false,
+                "git.ignoredRepositories": ["./bevy_0.17_2"],
+                "editor.inlayHints.enabled": "offUnlessPressed"
+            }
+        });
+
+        // Write the config into a workspace_settings.json file
+        let config_path = root.join("workspace_settings.json");
+        let mut f = File::create(&config_path).expect("create config file");
+        f.write_all(serde_json::to_string_pretty(&external).unwrap().as_bytes()).expect("write config");
+
+        // Create a pre-existing workspace file that already contains one setting we expect to preserve.
+        let workspace_filename = generate_workspace_filename(&root);
+        let workspace_path = root.join(&workspace_filename);
+        let pre_existing = serde_json::json!({
+            "folders": [],
+            "settings": {
+                "git.autoRepositoryDetection": true
+            }
+        });
+        let mut wf = File::create(&workspace_path).expect("create workspace");
+        wf.write_all(serde_json::to_string_pretty(&pre_existing).unwrap().as_bytes()).expect("write workspace");
+
+        // Create a minimal runnable so the function produces launches/tasks.
+        let runnable = Runnable {
+            name: "pkg::bin".to_string(),
+            package: "pkg".to_string(),
+            package_manifest: root.join("Cargo.toml"),
+            runnable_type: RunnableType::Binary,
+            required_features: vec![],
+            project_path: root.clone(),
+        };
+
+        // Ensure there is a Cargo.toml
+        let _ = File::create(root.join("Cargo.toml")).expect("create cargo toml");
+
+        // Run the writer which should merge the settings from the external workspace file
+        let written = write_workspace_for_root(&root, &[runnable], &root).expect("write workspace");
+
+        // Load the written workspace and assert merging behavior.
+        let content = fs::read_to_string(written).expect("read written workspace");
+        let parsed: serde_json::Value = serde_json::from_str(&content).expect("parse json");
+        let settings = parsed.get("settings").expect("settings present");
+
+        // Existing key should be preserved (true) and other keys added from external config
+        assert_eq!(settings.get("git.autoRepositoryDetection").and_then(|v| v.as_bool()), Some(true));
+        assert!(settings.get("git.ignoredRepositories").is_some());
+        assert_eq!(settings.get("editor.inlayHints.enabled").and_then(|v| v.as_str()), Some("offUnlessPressed"));
     }
 }
 
@@ -784,7 +845,7 @@ fn generate_default_tasks_internal(project_paths: &[PathBuf], name_map: &HashMap
 ///   for generated launchers and tasks. This ensures `${workspaceFolder:<name>}` in generated
 ///   launches/tasks reference the user's preserved folder name.
 /// - If that fails (for example the path does not exist yet), a best-effort resolved comparison
-///   is used. The function also backs up the previous workspace file and attempts a simple cleanup if the
+///   is used. We also back up the previous workspace file and attempt a simple cleanup if the
 ///   existing file is malformed.
 pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
     let workspace_filename = generate_workspace_filename(root_dir);
@@ -917,12 +978,9 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
         // If the OPEN_SPACE_MMO environment variable is set to "1", look for and merge the
         // ~/.config/open_space_mmo_workspace_settings.json settings into the workspace file. 
         // We add only keys that do not already exist in the user's workspace settings so we
-        // don't overwrite existing preferences. This allows users to customize their
-        // existing preferences.
-        // Select a configuration file to merge. If OPEN_SPACE_MMO=1 is set we look
-        // for the user's home config at ~/.config/open_space_mmo_workspace_settings.json.
-        // Otherwise we look in the workspace `output_dir` for any filename that ends
-        // with `workspace_settings.json` and use the first match.
+        // don't overwrite existing preferences. This prevents overwriting open space mmo contributor preferences.
+        // If OPEN_SPACE_MMO is not set, we look for any *workspace_settings.json file
+        // in the workspace root and merge that instead.
         let use_home = std::env::var("OPEN_SPACE_MMO").map(|v| v == "1").unwrap_or(false);
         let mut selected_config_path: Option<PathBuf> = None;
         if use_home {
@@ -950,80 +1008,89 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
         }
 
         if let Some(config_path) = selected_config_path {
-                    match fs::read_to_string(&config_path) {
-                        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-                            Ok(selected_val) => {
-                                if selected_val.is_object() {
-                                    if let Some(existing_settings) = workspace_file.settings.as_mut() {
-                                        if existing_settings.is_object() {
-                                            let existing_map = existing_settings.as_object_mut().unwrap();
-                                            for (k, v) in selected_val.as_object().unwrap().iter() {
-                                                if !existing_map.contains_key(k) {
-                                                    existing_map.insert(k.clone(), v.clone());
-                                                }
-                                            }
-                                        } else {
-                                            // Existing settings aren't an object; replace them with the external settings.
-                                            workspace_file.settings = Some(selected_val);
-                                        }
-                                    } else {
-                                        workspace_file.settings = Some(selected_val);
-                                    }
-                                }
+            match fs::read_to_string(&config_path) {
+                Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                    Ok(mut selected_val) => {
+                        // If the external config is a workspace file with a "settings" key,
+                        // extract the settings object to merge
+                        if selected_val.is_object() {
+                            let obj = selected_val.as_object().unwrap();
+                            if obj.contains_key("settings") && obj.get("settings").unwrap().is_object() {
+                                selected_val = obj.get("settings").unwrap().clone();
                             }
-                            Err(parse_err) => {
-                                eprintln!("Error: failed to parse {}: {}", config_path.display(), parse_err);
-                                // If stdin is not a TTY (non-interactive), abort instead of
-                                // silently continuing.
-                                if !atty::is(Stream::Stdin) {
-                                    return Err(format!("Aborted: {} is invalid JSON: {}", config_path.display(), parse_err).into());
-                                }
-                                // Prompt the user whether to continue without applying these settings.
-                                eprint!("Continue generating workspace without these settings? (y/N): ");
-                                use std::io::{self, Write};
-                                io::stdout().flush().ok();
-                                let mut input = String::new();
-                                match io::stdin().read_line(&mut input) {
-                                    Ok(_) => {
-                                        let ans = input.trim();
-                                        if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
-                                            eprintln!("Continuing without applying open_space_mmo settings.");
-                                        } else {
-                                            return Err(format!("Aborted by user due to invalid {}: {}", config_path.display(), parse_err).into());
+                        }
+
+                        if selected_val.is_object() {
+                            if let Some(existing_settings) = workspace_file.settings.as_mut() {
+                                if existing_settings.is_object() {
+                                    let existing_map = existing_settings.as_object_mut().unwrap();
+                                    for (k, v) in selected_val.as_object().unwrap().iter() {
+                                        if !existing_map.contains_key(k) {
+                                            existing_map.insert(k.clone(), v.clone());
                                         }
                                     }
-                                    Err(_) => {
-                                        // In interactive mode a read_line failure is unexpected;
-                                        // abort to be safe.
-                                        return Err(format!("Aborted: failed to read user input while handling invalid {}: {}", config_path.display(), parse_err).into());
-                                    }
+                                } else {
+                                    // Existing settings aren't an object; replace them with the external settings.
+                                    workspace_file.settings = Some(selected_val);
                                 }
-                            }
-                        },
-                        Err(read_err) => {
-                            eprintln!("Error: failed to read {}: {}", config_path.display(), read_err);
-                            if !atty::is(Stream::Stdin) {
-                                return Err(format!("Aborted: could not read {}: {}", config_path.display(), read_err).into());
-                            }
-                            eprint!("Continue generating workspace without these settings? (y/N): ");
-                            use std::io::{self, Write};
-                            io::stdout().flush().ok();
-                            let mut input = String::new();
-                            match io::stdin().read_line(&mut input) {
-                                Ok(_) => {
-                                    let ans = input.trim();
-                                    if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
-                                        eprintln!("Continuing without applying open_space_mmo settings.");
-                                    } else {
-                                        return Err(format!("Aborted by user due to unreadable {}: {}", config_path.display(), read_err).into());
-                                    }
-                                }
-                                Err(_) => {
-                                    return Err(format!("Aborted: failed to read user input while handling unreadable {}: {}", config_path.display(), read_err).into());
-                                }
+                            } else {
+                                workspace_file.settings = Some(selected_val);
                             }
                         }
                     }
+                    Err(parse_err) => {
+                        eprintln!("Error: failed to parse {}: {}", config_path.display(), parse_err);
+                        // If stdin is not a TTY (non-interactive), abort instead of
+                        // silently continuing.
+                        if !atty::is(Stream::Stdin) {
+                            return Err(format!("Aborted: {} is invalid JSON: {}", config_path.display(), parse_err).into());
+                        }
+                        // Prompt the user whether to continue without applying these settings.
+                        eprint!("Continue generating workspace without these settings? (y/N): ");
+                        use std::io::{self, Write};
+                        io::stdout().flush().ok();
+                        let mut input = String::new();
+                        match io::stdin().read_line(&mut input) {
+                            Ok(_) => {
+                                let ans = input.trim();
+                                if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
+                                    eprintln!("Continuing without applying open_space_mmo settings.");
+                                } else {
+                                    return Err(format!("Aborted by user due to invalid {}: {}", config_path.display(), parse_err).into());
+                                }
+                            }
+                            Err(_) => {
+                                // In interactive mode a read_line failure is unexpected;
+                                // abort to be safe.
+                                return Err(format!("Aborted: failed to read user input while handling invalid {}: {}", config_path.display(), parse_err).into());
+                            }
+                        }
+                    }
+                },
+                Err(read_err) => {
+                    eprintln!("Error: failed to read {}: {}", config_path.display(), read_err);
+                    if !atty::is(Stream::Stdin) {
+                        return Err(format!("Aborted: could not read {}: {}", config_path.display(), read_err).into());
+                    }
+                    eprint!("Continue generating workspace without these settings? (y/N): ");
+                    use std::io::{self, Write};
+                    io::stdout().flush().ok();
+                    let mut input = String::new();
+                    match io::stdin().read_line(&mut input) {
+                        Ok(_) => {
+                            let ans = input.trim();
+                            if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
+                                eprintln!("Continuing without applying open_space_mmo settings.");
+                            } else {
+                                return Err(format!("Aborted by user due to unreadable {}: {}", config_path.display(), read_err).into());
+                            }
+                        }
+                        Err(_) => {
+                            return Err(format!("Aborted: failed to read user input while handling unreadable {}: {}", config_path.display(), read_err).into());
+                        }
+                    }
+                }
+            }
         }
 
     let json_content = serde_json::to_string_pretty(&workspace_file)?;
