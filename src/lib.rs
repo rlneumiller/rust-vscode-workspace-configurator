@@ -292,6 +292,8 @@ pub struct WorkspaceFolder {
 pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> LaunchConfig {
     let mut configurations = Vec::new();
 
+
+
     // Build a list of unique project paths and a stable unique folder name for each.
     let mut project_paths: Vec<PathBuf> = runnables.iter().map(|r| r.project_path.clone()).collect();
     project_paths.sort();
@@ -365,12 +367,15 @@ pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> Launch
                 args.push("--manifest-path".to_string());
                 args.push(manifest_path_arg.clone());
 
+                // Compute BEVY_ASSET_ROOT (handles examples grouped under a shared assets folder)
+                let bevy_asset_root = compute_bevy_asset_root(&runnable.project_path, &runnable.project_path, &folder_token);
+
                 configurations.push(Configuration {
                     name: format!("{} (Bin)", binary_name),
                     config_type: "lldb".to_string(),
                     request: "launch".to_string(),
                     cwd: cwd.clone(),
-                    env: EnvVars { bevy_asset_root: cwd.clone() },
+                    env: EnvVars { bevy_asset_root },
                     cargo: CargoConfig { args, cwd: Some(cwd.clone()) },
                     args: vec![],
                 });
@@ -399,12 +404,16 @@ pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> Launch
                 args.push("--manifest-path".to_string());
                 args.push(manifest_path_arg.clone());
 
+                // Compute BEVY_ASSET_ROOT for examples using the package manifest parent as base
+                let base_dir = runnable.package_manifest.parent().unwrap_or(&runnable.project_path);
+                let bevy_asset_root = compute_bevy_asset_root(base_dir, &runnable.project_path, &folder_token);
+
                 configurations.push(Configuration {
                     name: format!("{} (Example)", example_name),
                     config_type: "lldb".to_string(),
                     request: "launch".to_string(),
                     cwd: cwd.clone(),
-                    env: EnvVars { bevy_asset_root: cwd.clone() },
+                    env: EnvVars { bevy_asset_root },
                     cargo: CargoConfig { args, cwd: Some(cwd.clone()) },
                     args: vec![],
                 });
@@ -461,12 +470,18 @@ pub fn create_configuration(
     args.push("--manifest-path".to_string());
     args.push(manifest_path_arg);
 
+    let base_dir = match runnable.runnable_type {
+        RunnableType::Binary => &runnable.project_path,
+        RunnableType::Example => runnable.package_manifest.parent().unwrap_or(&runnable.project_path),
+    };
+    let bevy_asset_root = compute_bevy_asset_root(base_dir, &runnable.project_path, &cwd);
+
     Configuration {
         name,
         config_type: "lldb".to_string(),
         request: "launch".to_string(),
         cwd: cwd.clone(),
-        env: EnvVars { bevy_asset_root: cwd.clone() },
+        env: EnvVars { bevy_asset_root },
         cargo: CargoConfig { args, cwd: Some(cwd) },
         args: vec![],
     }
@@ -484,7 +499,14 @@ mod tests {
     static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     fn acquire_env_lock() -> MutexGuard<'static, ()> {
-        ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+        // If a previous test panicked while holding the mutex the lock becomes
+        // poisoned; recover by taking the inner guard so subsequent tests can
+        // continue. We prefer tests to continue rather than aborting the whole
+        // suite when an unrelated panic occurred.
+        match ENV_MUTEX.get_or_init(|| Mutex::new(())).lock() {
+            Ok(g) => g,
+            Err(poison) => poison.into_inner(),
+        }
     }
 
     // Helper to temporarily set environment variables and restore them on drop.
@@ -680,6 +702,11 @@ mod tests {
         let td = tempdir().expect("tempdir");
         let root = td.path().to_path_buf();
 
+        // Ensure OPEN_SPACE_MMO is not set so the workspace-local settings file is preferred
+        // for this test (we want to verify merging from workspace_settings.json).
+        let mut env_guard = EnvRestore::new();
+        env_guard.remove("OPEN_SPACE_MMO");
+
         // Write an external config that looks like a workspace file with a "settings" key
         let external = serde_json::json!({
             "folders": [],
@@ -732,6 +759,34 @@ mod tests {
         assert_eq!(settings.get("git.autoRepositoryDetection").and_then(|v| v.as_bool()), Some(true));
         assert!(settings.get("git.ignoredRepositories").is_some());
         assert_eq!(settings.get("editor.inlayHints.enabled").and_then(|v| v.as_str()), Some("offUnlessPressed"));
+    }
+
+    #[test]
+    fn test_compute_bevy_asset_root_various_layouts() {
+        let _env_lock = acquire_env_lock();
+        let td = tempdir().expect("tempdir");
+        let root = td.path().to_path_buf();
+
+        // Case A: project at root and assets at root/assets -> token returned
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        let token = "${workspaceFolder}";
+        let bevy = compute_bevy_asset_root(&root, &root, token);
+        assert_eq!(bevy, token);
+
+        // Case B: project is in a nested subdirectory while assets live in the workspace root
+        let sub = root.join("crates").join("pkg");
+        fs::create_dir_all(&sub).expect("create subdir");
+        let bevy2 = compute_bevy_asset_root(&sub, &sub, token);
+        // Should still be based on the workspace token but include a relative path component
+        assert!(bevy2.starts_with(token));
+        assert_ne!(bevy2, token);
+
+        // Case C: no assets anywhere -> fallback to token
+        let td2 = tempdir().expect("tempdir2");
+        let p = td2.path().join("project");
+        fs::create_dir_all(&p).expect("create project");
+        let bevy3 = compute_bevy_asset_root(&p, &p, token);
+        assert_eq!(bevy3, token);
     }
 }
 
@@ -981,6 +1036,12 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
         // don't overwrite existing preferences. This prevents overwriting open space mmo contributor preferences.
         // If OPEN_SPACE_MMO is not set, we look for any *workspace_settings.json file
         // in the workspace root and merge that instead.
+        // If the OPEN_SPACE_MMO environment variable is set to "1", look for and merge the
+        // ~/.config/open_space_mmo_workspace_settings.json settings into the workspace file. 
+        // We add only keys that do not already exist in the user's workspace settings so we
+        // don't overwrite existing preferences. This prevents overwriting open space mmo contributor preferences.
+        // If OPEN_SPACE_MMO is not set, we look for any *workspace_settings.json file
+        // in the workspace root and merge that instead.
         let use_home = std::env::var("OPEN_SPACE_MMO").map(|v| v == "1").unwrap_or(false);
         let mut selected_config_path: Option<PathBuf> = None;
         if use_home {
@@ -1021,6 +1082,8 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
                         }
 
                         if selected_val.is_object() {
+                            // Debug: print what we're about to merge (temporary)
+                            //eprintln!("DBG: external selected settings = {}", selected_val);
                             if let Some(existing_settings) = workspace_file.settings.as_mut() {
                                 if existing_settings.is_object() {
                                     let existing_map = existing_settings.as_object_mut().unwrap();
@@ -1097,4 +1160,38 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
     fs::write(&workspace_path, json_content)?;
 
     Ok(workspace_path)
+}
+
+/// Find the asset root directory by walking up from the base directory until finding an "assets" folder.
+/// If no "assets" folder is found, returns the base directory.
+fn find_asset_root(base_dir: &Path) -> PathBuf {
+    let mut current = base_dir;
+    loop {
+        if current.join("assets").is_dir() {
+            return current.to_path_buf();
+        }
+        if let Some(parent) = current.parent() {
+            current = parent;
+        } else {
+            return base_dir.to_path_buf();
+        }
+    }
+}
+
+/// Compute the BEVY_ASSET_ROOT token given a base directory (where to start
+/// looking for an `assets` folder), the project's path and the workspace token
+/// (for example `${workspaceFolder:foo}`). Returns the token itself when the
+/// nearest `assets` folder is the same directory as `project_path` (i.e. no
+/// relative prefix is needed), otherwise returns a token that points from the
+/// project path to the directory that contains `assets`.
+fn compute_bevy_asset_root(base_dir: &Path, project_path: &Path, token: &str) -> String {
+    let asset_root = find_asset_root(base_dir);
+    let asset_root_relative = pathdiff::diff_paths(&asset_root, project_path)
+        .unwrap_or_else(|| Path::new(".").to_path_buf());
+    // Normalize the relative path; pathdiff may return an empty path instead of "."
+    if asset_root_relative == Path::new(".") || asset_root_relative.as_os_str().is_empty() {
+        token.to_string()
+    } else {
+        format!("{}/{}", token, asset_root_relative.display())
+    }
 }
