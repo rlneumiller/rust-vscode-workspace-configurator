@@ -798,25 +798,6 @@ fn generate_workspace_filename(root_dir: &Path) -> String {
     format!("{}.code-workspace", root_name)
 }
 
-fn generate_workspace_name(root_dir: &Path, project_paths: &[PathBuf]) -> String {
-    if project_paths.len() == 1 {
-        if let Some(project_name) = project_paths[0].file_name().and_then(|n| n.to_str()) {
-            return format!("{} (Rust)", project_name);
-        }
-    }
-
-    let root_name = root_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("Rust Projects");
-
-    if project_paths.len() > 1 {
-        format!("{} ({} Rust Projects)", root_name, project_paths.len())
-    } else {
-        format!("{} (Rust)", root_name)
-    }
-}
-
 fn generate_default_tasks_internal(project_paths: &[PathBuf], name_map: &HashMap<PathBuf, String>) -> WorkspaceTasks {
     let mut tasks = Vec::new();
 
@@ -940,9 +921,6 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
     let mut project_paths: Vec<PathBuf> = runnables.iter().map(|r| r.project_path.clone()).collect();
     project_paths.sort();
     project_paths.dedup();
-
-    let workspace_name = generate_workspace_name(root_dir, &project_paths);
-    workspace_file.name = Some(workspace_name);
 
     // Create the unique folder names
     let mut name_map: HashMap<PathBuf, String> = HashMap::new();
