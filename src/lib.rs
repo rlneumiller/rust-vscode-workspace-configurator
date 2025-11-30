@@ -1,13 +1,14 @@
+use atty::Stream;
 use cargo_metadata::{CargoOpt, MetadataCommand, TargetKind};
-use std::path::{Path, PathBuf};
-use std::collections::{HashMap, HashSet};
-use std::fs;
+use pathdiff;
 use regex::Regex;
-use std::error::Error;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use atty::Stream;
-use pathdiff;
+use serde_json::Map;
+use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// The type of runnable target.
 /// Type of a runnable target discovered in a package.
@@ -53,7 +54,11 @@ pub fn discover_runnables(root_dir: &Path) -> Result<Vec<Runnable>, Box<dyn std:
         find_rust_projects_recursive(root_dir, &mut found_projects)?;
 
         if found_projects.is_empty() {
-            return Err(format!("No Rust projects (Cargo.toml files) found in {}", root_dir.display()).into());
+            return Err(format!(
+                "No Rust projects (Cargo.toml files) found in {}",
+                root_dir.display()
+            )
+            .into());
         }
     }
 
@@ -66,45 +71,65 @@ pub fn discover_runnables(root_dir: &Path) -> Result<Vec<Runnable>, Box<dyn std:
         {
             Ok(metadata) => metadata,
             Err(e) => {
-                eprintln!("Warning: Failed to read metadata for {}: {}. Skipping this path.", manifest_path.display(), e);
+                eprintln!(
+                    "Warning: Failed to read metadata for {}: {}. Skipping this path.",
+                    manifest_path.display(),
+                    e
+                );
                 continue;
             }
         };
 
-        let canonical_project_path = project_path.canonicalize().unwrap_or_else(|_| project_path.clone());
+        let canonical_project_path = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.clone());
 
         // Handle both workspace and single package cases
-        let packages_to_process: Vec<&cargo_metadata::Package> = if metadata.workspace_members.is_empty() {
-            // Single package project - find the package that matches this manifest path
-            let canonical_manifest = manifest_path.canonicalize().unwrap_or(manifest_path.clone());
+        let packages_to_process: Vec<&cargo_metadata::Package> =
+            if metadata.workspace_members.is_empty() {
+                // Single package project - find the package that matches this manifest path
+                let canonical_manifest = manifest_path
+                    .canonicalize()
+                    .unwrap_or(manifest_path.clone());
 
-            match metadata.packages.iter().find(|p| {
-                let pkg_manifest_canonical = p.manifest_path.as_std_path().canonicalize()
-                    .unwrap_or_else(|_| p.manifest_path.as_std_path().to_path_buf());
-                pkg_manifest_canonical == canonical_manifest
-            }) {
-                Some(package) => vec![package],
-                None => {
-                    eprintln!("Warning: Could not find package for manifest {}. Skipping this path.", manifest_path.display());
-                    continue;
+                match metadata.packages.iter().find(|p| {
+                    let pkg_manifest_canonical = p
+                        .manifest_path
+                        .as_std_path()
+                        .canonicalize()
+                        .unwrap_or_else(|_| p.manifest_path.as_std_path().to_path_buf());
+                    pkg_manifest_canonical == canonical_manifest
+                }) {
+                    Some(package) => vec![package],
+                    None => {
+                        eprintln!(
+                            "Warning: Could not find package for manifest {}. Skipping this path.",
+                            manifest_path.display()
+                        );
+                        continue;
+                    }
                 }
-            }
-        } else {
-            // Workspace project - process all workspace members that are in this project directory
-            metadata
-                .packages
-                .iter()
-                .filter(|p| {
-                    let pkg_manifest_dir = p.manifest_path.parent().unwrap_or(&p.manifest_path);
-                    let pkg_canonical_dir = pkg_manifest_dir.as_std_path().canonicalize()
-                        .unwrap_or_else(|_| pkg_manifest_dir.as_std_path().to_path_buf());
-                    pkg_canonical_dir.starts_with(&canonical_project_path)
-                })
-                .collect()
-        };
+            } else {
+                // Workspace project - process all workspace members that are in this project directory
+                metadata
+                    .packages
+                    .iter()
+                    .filter(|p| {
+                        let pkg_manifest_dir = p.manifest_path.parent().unwrap_or(&p.manifest_path);
+                        let pkg_canonical_dir = pkg_manifest_dir
+                            .as_std_path()
+                            .canonicalize()
+                            .unwrap_or_else(|_| pkg_manifest_dir.as_std_path().to_path_buf());
+                        pkg_canonical_dir.starts_with(&canonical_project_path)
+                    })
+                    .collect()
+            };
 
         if packages_to_process.is_empty() {
-            eprintln!("Warning: No packages found for project {}. Nothing to run.", project_path.display());
+            eprintln!(
+                "Warning: No packages found for project {}. Nothing to run.",
+                project_path.display()
+            );
             continue;
         }
 
@@ -138,9 +163,15 @@ pub fn discover_runnables(root_dir: &Path) -> Result<Vec<Runnable>, Box<dyn std:
     Ok(runnables)
 }
 
-fn find_rust_projects_recursive(dir: &Path, projects: &mut Vec<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+fn find_rust_projects_recursive(
+    dir: &Path,
+    projects: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !dir.is_dir() {
-        print!("{} is not a directory though we thought it might be.", dir.display());
+        print!(
+            "{} is not a directory though we thought it might be.",
+            dir.display()
+        );
         return Ok(());
     }
 
@@ -292,10 +323,9 @@ pub struct WorkspaceFolder {
 pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> LaunchConfig {
     let mut configurations = Vec::new();
 
-
-
     // Build a list of unique project paths and a stable unique folder name for each.
-    let mut project_paths: Vec<PathBuf> = runnables.iter().map(|r| r.project_path.clone()).collect();
+    let mut project_paths: Vec<PathBuf> =
+        runnables.iter().map(|r| r.project_path.clone()).collect();
     project_paths.sort();
     project_paths.dedup();
 
@@ -330,7 +360,8 @@ pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> Launch
         };
 
         // Determine the folder token for this runnable's project (scoped workspaceFolder)
-        let folder_name = name_map.get(&runnable.project_path)
+        let folder_name = name_map
+            .get(&runnable.project_path)
             .map(|s| s.clone())
             .unwrap_or_else(|| "root".to_string());
         let folder_token = format!("${{workspaceFolder:{}}}", folder_name);
@@ -339,18 +370,33 @@ pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> Launch
         let manifest_path_arg = format!("{}/Cargo.toml", folder_token);
         let target_dir_arg = format!("{}/target", folder_token);
 
-        let project_manifest = if relative_path == Path::new("") || relative_path == Path::new(".") {
-            root_dir.join("Cargo.toml").canonicalize().unwrap_or(root_dir.join("Cargo.toml"))
+        let project_manifest = if relative_path == Path::new("") || relative_path == Path::new(".")
+        {
+            root_dir
+                .join("Cargo.toml")
+                .canonicalize()
+                .unwrap_or(root_dir.join("Cargo.toml"))
         } else {
-            root_dir.join(&relative_path).join("Cargo.toml").canonicalize().unwrap_or(root_dir.join(&relative_path).join("Cargo.toml"))
+            root_dir
+                .join(&relative_path)
+                .join("Cargo.toml")
+                .canonicalize()
+                .unwrap_or(root_dir.join(&relative_path).join("Cargo.toml"))
         };
 
         match runnable.runnable_type {
             RunnableType::Binary => {
                 let binary_name = runnable.name.split("::").last().unwrap_or(&runnable.name);
-                let mut args = vec!["run".to_string(), "--bin".to_string(), binary_name.to_string()];
+                let mut args = vec![
+                    "run".to_string(),
+                    "--bin".to_string(),
+                    binary_name.to_string(),
+                ];
 
-                let pkg_manifest = runnable.package_manifest.canonicalize().unwrap_or(runnable.package_manifest.clone());
+                let pkg_manifest = runnable
+                    .package_manifest
+                    .canonicalize()
+                    .unwrap_or(runnable.package_manifest.clone());
                 if pkg_manifest != project_manifest {
                     args.push("--package".to_string());
                     args.push(runnable.package.clone());
@@ -368,7 +414,11 @@ pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> Launch
                 args.push(manifest_path_arg.clone());
 
                 // Compute BEVY_ASSET_ROOT (handles examples grouped under a shared assets folder)
-                let bevy_asset_root = compute_bevy_asset_root(&runnable.project_path, &runnable.project_path, &folder_token);
+                let bevy_asset_root = compute_bevy_asset_root(
+                    &runnable.project_path,
+                    &runnable.project_path,
+                    &folder_token,
+                );
 
                 configurations.push(Configuration {
                     name: format!("{} (Bin)", binary_name),
@@ -376,18 +426,31 @@ pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> Launch
                     request: "launch".to_string(),
                     cwd: cwd.clone(),
                     env: EnvVars { bevy_asset_root },
-                    cargo: CargoConfig { args, cwd: Some(cwd.clone()) },
+                    cargo: CargoConfig {
+                        args,
+                        cwd: Some(cwd.clone()),
+                    },
                     args: vec![],
                 });
             }
             RunnableType::Example => {
-                let example_name = runnable.name.split("::").nth(1)
+                let example_name = runnable
+                    .name
+                    .split("::")
+                    .nth(1)
                     .and_then(|s| s.strip_suffix(" (example)"))
                     .unwrap_or(&runnable.name);
 
-                let mut args = vec!["run".to_string(), "--example".to_string(), example_name.to_string()];
+                let mut args = vec![
+                    "run".to_string(),
+                    "--example".to_string(),
+                    example_name.to_string(),
+                ];
 
-                let pkg_manifest = runnable.package_manifest.canonicalize().unwrap_or(runnable.package_manifest.clone());
+                let pkg_manifest = runnable
+                    .package_manifest
+                    .canonicalize()
+                    .unwrap_or(runnable.package_manifest.clone());
                 if pkg_manifest != project_manifest {
                     args.push("--package".to_string());
                     args.push(runnable.package.clone());
@@ -405,8 +468,12 @@ pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> Launch
                 args.push(manifest_path_arg.clone());
 
                 // Compute BEVY_ASSET_ROOT for examples using the package manifest parent as base
-                let base_dir = runnable.package_manifest.parent().unwrap_or(&runnable.project_path);
-                let bevy_asset_root = compute_bevy_asset_root(base_dir, &runnable.project_path, &folder_token);
+                let base_dir = runnable
+                    .package_manifest
+                    .parent()
+                    .unwrap_or(&runnable.project_path);
+                let bevy_asset_root =
+                    compute_bevy_asset_root(base_dir, &runnable.project_path, &folder_token);
 
                 configurations.push(Configuration {
                     name: format!("{} (Example)", example_name),
@@ -414,7 +481,10 @@ pub fn generate_launch_config(runnables: &[Runnable], root_dir: &Path) -> Launch
                     request: "launch".to_string(),
                     cwd: cwd.clone(),
                     env: EnvVars { bevy_asset_root },
-                    cargo: CargoConfig { args, cwd: Some(cwd.clone()) },
+                    cargo: CargoConfig {
+                        args,
+                        cwd: Some(cwd.clone()),
+                    },
                     args: vec![],
                 });
             }
@@ -452,7 +522,10 @@ pub fn create_configuration(
     let mut args = vec!["run".to_string()];
     args.extend(type_args.into_iter());
 
-    let pkg_manifest = runnable.package_manifest.canonicalize().unwrap_or(runnable.package_manifest.clone());
+    let pkg_manifest = runnable
+        .package_manifest
+        .canonicalize()
+        .unwrap_or(runnable.package_manifest.clone());
     if pkg_manifest != project_manifest {
         args.push("--package".to_string());
         args.push(runnable.package.clone());
@@ -472,7 +545,10 @@ pub fn create_configuration(
 
     let base_dir = match runnable.runnable_type {
         RunnableType::Binary => &runnable.project_path,
-        RunnableType::Example => runnable.package_manifest.parent().unwrap_or(&runnable.project_path),
+        RunnableType::Example => runnable
+            .package_manifest
+            .parent()
+            .unwrap_or(&runnable.project_path),
     };
     let bevy_asset_root = compute_bevy_asset_root(base_dir, &runnable.project_path, &cwd);
 
@@ -482,7 +558,10 @@ pub fn create_configuration(
         request: "launch".to_string(),
         cwd: cwd.clone(),
         env: EnvVars { bevy_asset_root },
-        cargo: CargoConfig { args, cwd: Some(cwd) },
+        cargo: CargoConfig {
+            args,
+            cwd: Some(cwd),
+        },
         args: vec![],
     }
 }
@@ -490,11 +569,11 @@ pub fn create_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-    use tempfile::tempdir;
     use std::fs::File;
     use std::io::Write;
+    use std::path::PathBuf;
     use std::sync::{Mutex, MutexGuard, OnceLock};
+    use tempfile::tempdir;
 
     static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -515,16 +594,24 @@ mod tests {
     }
 
     impl EnvRestore {
-        fn new() -> Self { EnvRestore { entries: Vec::new() } }
+        fn new() -> Self {
+            EnvRestore {
+                entries: Vec::new(),
+            }
+        }
         fn set(&mut self, k: &str, v: &str) {
             let prev = std::env::var(k).ok();
             self.entries.push((k.to_string(), prev));
-            unsafe { std::env::set_var(k, v); }
+            unsafe {
+                std::env::set_var(k, v);
+            }
         }
         fn remove(&mut self, k: &str) {
             let prev = std::env::var(k).ok();
             self.entries.push((k.to_string(), prev));
-            unsafe { std::env::remove_var(k); }
+            unsafe {
+                std::env::remove_var(k);
+            }
         }
     }
 
@@ -532,8 +619,12 @@ mod tests {
         fn drop(&mut self) {
             for (k, prev) in self.entries.drain(..).rev() {
                 match prev {
-                    Some(val) => unsafe { std::env::set_var(&k, &val); },
-                    None => unsafe { std::env::remove_var(&k); },
+                    Some(val) => unsafe {
+                        std::env::set_var(&k, &val);
+                    },
+                    None => unsafe {
+                        std::env::remove_var(&k);
+                    },
                 }
             }
         }
@@ -566,7 +657,9 @@ mod tests {
         let args = &cfg.cargo.args;
         assert!(args.contains(&"--bin".to_string()));
         assert!(args.contains(&"--features".to_string()));
-        assert!(args.iter().any(|a| a.contains("--manifest-path") || a.contains("--target-dir") || a.contains("--package")));
+        assert!(args.iter().any(|a| a.contains("--manifest-path")
+            || a.contains("--target-dir")
+            || a.contains("--package")));
         assert_eq!(cfg.cwd, "${workspaceFolder}".to_string());
     }
 
@@ -588,9 +681,12 @@ mod tests {
         // Write the config into a fake HOME/.config/open_space_mmo_workspace_settings.json
         let home_dir = td.path().join("home");
         fs::create_dir_all(home_dir.join(".config")).expect("create home .config");
-        let config_path = home_dir.join(".config").join("open_space_mmo_workspace_settings.json");
+        let config_path = home_dir
+            .join(".config")
+            .join("open_space_mmo_workspace_settings.json");
         let mut f = File::create(&config_path).expect("create config file");
-        f.write_all(serde_json::to_string_pretty(&external).unwrap().as_bytes()).expect("write config");
+        f.write_all(serde_json::to_string_pretty(&external).unwrap().as_bytes())
+            .expect("write config");
 
         // Create a pre-existing workspace file that already contains one setting we expect to preserve.
         let workspace_filename = generate_workspace_filename(&root);
@@ -602,7 +698,12 @@ mod tests {
             }
         });
         let mut wf = File::create(&workspace_path).expect("create workspace");
-        wf.write_all(serde_json::to_string_pretty(&pre_existing).unwrap().as_bytes()).expect("write workspace");
+        wf.write_all(
+            serde_json::to_string_pretty(&pre_existing)
+                .unwrap()
+                .as_bytes(),
+        )
+        .expect("write workspace");
 
         // Create a minimal runnable so the function produces launches/tasks.
         let runnable = Runnable {
@@ -617,10 +718,10 @@ mod tests {
         // Ensure there is a Cargo.toml (not strictly necessary but keeps paths realistic).
         let _ = File::create(root.join("Cargo.toml")).expect("create cargo toml");
 
-    // Set HOME to point at our fake home and enable merging via OPEN_SPACE_MMO.
-    let mut env_guard = EnvRestore::new();
-    env_guard.set("HOME", home_dir.to_string_lossy().as_ref());
-    env_guard.set("OPEN_SPACE_MMO", "1");
+        // Set HOME to point at our fake home and enable merging via OPEN_SPACE_MMO.
+        let mut env_guard = EnvRestore::new();
+        env_guard.set("HOME", home_dir.to_string_lossy().as_ref());
+        env_guard.set("OPEN_SPACE_MMO", "1");
 
         // Run the writer which should merge external settings into the existing workspace file
         let written = write_workspace_for_root(&root, &[runnable], &root).expect("write workspace");
@@ -631,9 +732,19 @@ mod tests {
         let settings = parsed.get("settings").expect("settings present");
 
         // Existing key should be preserved (true) and other keys added from external config
-        assert_eq!(settings.get("git.autoRepositoryDetection").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            settings
+                .get("git.autoRepositoryDetection")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert!(settings.get("git.ignoredRepositories").is_some());
-        assert_eq!(settings.get("editor.inlayHints.enabled").and_then(|v| v.as_str()), Some("offUnlessPressed"));
+        assert_eq!(
+            settings
+                .get("editor.inlayHints.enabled")
+                .and_then(|v| v.as_str()),
+            Some("offUnlessPressed")
+        );
     }
 
     #[test]
@@ -641,7 +752,9 @@ mod tests {
         // Ensure OPEN_SPACE_MMO is not set and there are no workspace_settings.json files
         // Serialize environment-modifying tests to avoid races when cargo runs tests in parallel.
         let _env_lock = acquire_env_lock();
-        unsafe { std::env::remove_var("OPEN_SPACE_MMO"); }
+        unsafe {
+            std::env::remove_var("OPEN_SPACE_MMO");
+        }
 
         let td = tempdir().expect("tempdir");
         let root = td.path().to_path_buf();
@@ -656,7 +769,12 @@ mod tests {
             }
         });
         let mut wf = File::create(&workspace_path).expect("create workspace");
-        wf.write_all(serde_json::to_string_pretty(&pre_existing).unwrap().as_bytes()).expect("write workspace");
+        wf.write_all(
+            serde_json::to_string_pretty(&pre_existing)
+                .unwrap()
+                .as_bytes(),
+        )
+        .expect("write workspace");
 
         // Create a minimal runnable
         let runnable = Runnable {
@@ -690,7 +808,12 @@ mod tests {
         let settings = parsed.get("settings").expect("settings present");
 
         // Existing key preserved
-        assert_eq!(settings.get("git.autoRepositoryDetection").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            settings
+                .get("git.autoRepositoryDetection")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         // No new keys were added
         assert!(settings.get("editor.inlayHints.enabled").is_none());
     }
@@ -720,7 +843,8 @@ mod tests {
         // Write the config into a workspace_settings.json file
         let config_path = root.join("workspace_settings.json");
         let mut f = File::create(&config_path).expect("create config file");
-        f.write_all(serde_json::to_string_pretty(&external).unwrap().as_bytes()).expect("write config");
+        f.write_all(serde_json::to_string_pretty(&external).unwrap().as_bytes())
+            .expect("write config");
 
         // Create a pre-existing workspace file that already contains one setting we expect to preserve.
         let workspace_filename = generate_workspace_filename(&root);
@@ -732,7 +856,12 @@ mod tests {
             }
         });
         let mut wf = File::create(&workspace_path).expect("create workspace");
-        wf.write_all(serde_json::to_string_pretty(&pre_existing).unwrap().as_bytes()).expect("write workspace");
+        wf.write_all(
+            serde_json::to_string_pretty(&pre_existing)
+                .unwrap()
+                .as_bytes(),
+        )
+        .expect("write workspace");
 
         // Create a minimal runnable so the function produces launches/tasks.
         let runnable = Runnable {
@@ -756,9 +885,19 @@ mod tests {
         let settings = parsed.get("settings").expect("settings present");
 
         // Existing key should be preserved (true) and other keys added from external config
-        assert_eq!(settings.get("git.autoRepositoryDetection").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            settings
+                .get("git.autoRepositoryDetection")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
         assert!(settings.get("git.ignoredRepositories").is_some());
-        assert_eq!(settings.get("editor.inlayHints.enabled").and_then(|v| v.as_str()), Some("offUnlessPressed"));
+        assert_eq!(
+            settings
+                .get("editor.inlayHints.enabled")
+                .and_then(|v| v.as_str()),
+            Some("offUnlessPressed")
+        );
     }
 
     #[test]
@@ -798,7 +937,10 @@ fn generate_workspace_filename(root_dir: &Path) -> String {
     format!("{}.code-workspace", root_name)
 }
 
-fn generate_default_tasks_internal(project_paths: &[PathBuf], name_map: &HashMap<PathBuf, String>) -> WorkspaceTasks {
+fn generate_default_tasks_internal(
+    project_paths: &[PathBuf],
+    name_map: &HashMap<PathBuf, String>,
+) -> WorkspaceTasks {
     let mut tasks = Vec::new();
 
     for project_path in project_paths {
@@ -807,7 +949,10 @@ fn generate_default_tasks_internal(project_paths: &[PathBuf], name_map: &HashMap
             .and_then(|n| n.to_str())
             .unwrap_or("project");
 
-        let folder_name = name_map.get(project_path).cloned().unwrap_or_else(|| "root".to_string());
+        let folder_name = name_map
+            .get(project_path)
+            .cloned()
+            .unwrap_or_else(|| "root".to_string());
         let folder_token = format!("${{workspaceFolder:{}}}", folder_name);
         let cwd = Some(folder_token);
 
@@ -883,7 +1028,11 @@ fn generate_default_tasks_internal(project_paths: &[PathBuf], name_map: &HashMap
 /// - If that fails (for example the path does not exist yet), a best-effort resolved comparison
 ///   is used. We also back up the previous workspace file and attempt a simple cleanup if the
 ///   existing file is malformed.
-pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_dir: &Path) -> Result<PathBuf, Box<dyn Error>> {
+pub fn write_workspace_for_root(
+    output_dir: &Path,
+    runnables: &[Runnable],
+    root_dir: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
     let workspace_filename = generate_workspace_filename(root_dir);
     let workspace_path = output_dir.join(&workspace_filename);
 
@@ -894,7 +1043,9 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
             let mut counter = 1;
             loop {
                 backup_path = output_dir.join(format!("{}.{}", base_backup_name, counter));
-                if !backup_path.exists() { break; }
+                if !backup_path.exists() {
+                    break;
+                }
                 counter += 1;
             }
         }
@@ -904,7 +1055,10 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
         match serde_json::from_str::<WorkspaceFile>(&content) {
             Ok(w) => w,
             Err(parse_err) => {
-                eprintln!("Warning: Failed to parse existing workspace file: {}. Attempting cleanup.", parse_err);
+                eprintln!(
+                    "Warning: Failed to parse existing workspace file: {}. Attempting cleanup.",
+                    parse_err
+                );
                 let trailing_comma_re = Regex::new(r",(\s*[}\]])").unwrap();
                 let cleaned = trailing_comma_re.replace_all(&content, "$1").to_string();
                 match serde_json::from_str::<WorkspaceFile>(&cleaned) {
@@ -918,7 +1072,8 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
     };
 
     // Collect unique project paths
-    let mut project_paths: Vec<PathBuf> = runnables.iter().map(|r| r.project_path.clone()).collect();
+    let mut project_paths: Vec<PathBuf> =
+        runnables.iter().map(|r| r.project_path.clone()).collect();
     project_paths.sort();
     project_paths.dedup();
 
@@ -926,8 +1081,14 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
     let mut name_map: HashMap<PathBuf, String> = HashMap::new();
     let mut used_names: HashSet<String> = HashSet::new();
     for project_path in &project_paths {
-        let mut candidate = project_path.file_name().and_then(|n| n.to_str()).unwrap_or("root").to_string();
-        if candidate == "." || candidate.is_empty() { candidate = "root".to_string(); }
+        let mut candidate = project_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("root")
+            .to_string();
+        if candidate == "." || candidate.is_empty() {
+            candidate = "root".to_string();
+        }
         candidate = candidate.replace(' ', "_");
         let original = candidate.clone();
         let mut suffix = 1;
@@ -947,13 +1108,15 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
         Vec::new()
     };
 
-    // We compare the folder path strings as they are. 
+    // We compare the folder path strings as they are.
     // For the projects we discover, we build the same relative path
     // format and only add them if they don't already exist.
     for project_path in &project_paths {
         // Build the relative path string that exists in the workspace file (e.g. "path": "../planets_example_03"
         let relative_path = match pathdiff::diff_paths(&project_path, root_dir) {
-            Some(path) if path != Path::new("") && path != Path::new(".") => format!("./{}", path.display()),
+            Some(path) if path != Path::new("") && path != Path::new(".") => {
+                format!("./{}", path.display())
+            }
             _ => ".".to_string(),
         };
 
@@ -967,9 +1130,14 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
         for existing in &folders {
             let existing_path_str = &existing.path;
             let resolved_existing = if Path::new(existing_path_str).is_absolute() {
-                PathBuf::from(existing_path_str).canonicalize().unwrap_or(PathBuf::from(existing_path_str))
+                PathBuf::from(existing_path_str)
+                    .canonicalize()
+                    .unwrap_or(PathBuf::from(existing_path_str))
             } else {
-                root_dir.join(existing_path_str).canonicalize().unwrap_or(root_dir.join(existing_path_str))
+                root_dir
+                    .join(existing_path_str)
+                    .canonicalize()
+                    .unwrap_or(root_dir.join(existing_path_str))
             };
 
             if resolved_existing == absolute_project_path {
@@ -985,134 +1153,222 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
 
         if !already_present {
             let folder_name = name_map.get(project_path).cloned();
-            folders.push(WorkspaceFolder { path: relative_path, name: folder_name });
+            folders.push(WorkspaceFolder {
+                path: relative_path,
+                name: folder_name,
+            });
         }
     }
 
     if folders.is_empty() {
-        folders.push(WorkspaceFolder { path: ".".to_string(), name: Some("root".to_string()) });
+        folders.push(WorkspaceFolder {
+            path: ".".to_string(),
+            name: Some("root".to_string()),
+        });
     }
 
     workspace_file.folders = folders;
 
-    if workspace_file.settings.as_ref().map_or(false, |s| s.is_null()) {
+    if workspace_file
+        .settings
+        .as_ref()
+        .map_or(false, |s| s.is_null())
+    {
         workspace_file.settings = None;
     }
-    if workspace_file.extensions.as_ref().map_or(false, |e| e.is_null() || (e.is_object() && e.as_object().unwrap().is_empty())) {
+    if workspace_file.extensions.as_ref().map_or(false, |e| {
+        e.is_null() || (e.is_object() && e.as_object().unwrap().is_empty())
+    }) {
         workspace_file.extensions = None;
     }
 
     let launch = generate_launch_config(runnables, root_dir);
-    workspace_file.launch = Some(WorkspaceLaunchConfig { version: launch.version, configurations: launch.configurations });
+    workspace_file.launch = Some(WorkspaceLaunchConfig {
+        version: launch.version,
+        configurations: launch.configurations,
+    });
 
     let default_tasks = generate_default_tasks_internal(&project_paths, &name_map);
     workspace_file.tasks = Some(default_tasks);
 
-        // If the OPEN_SPACE_MMO environment variable is set to "1", look for and merge the
-        // ~/.config/open_space_mmo_workspace_settings.json settings into the workspace file. 
-        // We add only keys that do not already exist in the user's workspace settings so we
-        // don't overwrite existing preferences. This prevents overwriting open space mmo contributor preferences.
-        // If OPEN_SPACE_MMO is not set, we look for any *workspace_settings.json file
-        // in the workspace root and merge that instead.
-        // If the OPEN_SPACE_MMO environment variable is set to "1", look for and merge the
-        // ~/.config/open_space_mmo_workspace_settings.json settings into the workspace file. 
-        // We add only keys that do not already exist in the user's workspace settings so we
-        // don't overwrite existing preferences. This prevents overwriting open space mmo contributor preferences.
-        // If OPEN_SPACE_MMO is not set, we look for any *workspace_settings.json file
-        // in the workspace root and merge that instead.
-        let use_home = std::env::var("OPEN_SPACE_MMO").map(|v| v == "1").unwrap_or(false);
-        let mut selected_config_path: Option<PathBuf> = None;
-        if use_home {
-            if let Ok(home) = std::env::var("HOME") {
-                let cfg = PathBuf::from(home).join(".config").join("open_space_mmo_workspace_settings.json");
-                if cfg.exists() {
-                    selected_config_path = Some(cfg);
+    // If the OPEN_SPACE_MMO environment variable is set to "1", look for and merge the
+    // ~/.config/open_space_mmo_workspace_settings.json settings into the workspace file.
+    // We add only keys that do not already exist in the user's workspace settings so we
+    // don't overwrite existing preferences. This prevents overwriting open space mmo contributor preferences.
+    // If OPEN_SPACE_MMO is not set, we look for any *workspace_settings.json file
+    // in the workspace root and merge that instead.
+    // If the OPEN_SPACE_MMO environment variable is set to "1", look for and merge the
+    // ~/.config/open_space_mmo_workspace_settings.json settings into the workspace file.
+    // We add only keys that do not already exist in the user's workspace settings so we
+    // don't overwrite existing preferences. This prevents overwriting open space mmo contributor preferences.
+    // If OPEN_SPACE_MMO is not set, we look for any *workspace_settings.json file
+    // in the workspace root and merge that instead.
+    let use_home = std::env::var("OPEN_SPACE_MMO")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    let mut selected_config_path: Option<PathBuf> = None;
+    if use_home {
+        if let Ok(home) = std::env::var("HOME") {
+            let cfg = PathBuf::from(home)
+                .join(".config")
+                .join("open_space_mmo_workspace_settings.json");
+            if cfg.exists() {
+                selected_config_path = Some(cfg);
+            }
+        }
+    } else {
+        // Look for a file in the workspace root that ends with `workspace_settings.json`.
+        if let Ok(entries) = fs::read_dir(output_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                        if name.ends_with("workspace_settings.json") {
+                            selected_config_path = Some(p);
+                            break;
+                        }
+                    }
                 }
             }
-        } else {
-            // Look for a file in the workspace root that ends with `workspace_settings.json`.
-            if let Ok(entries) = fs::read_dir(output_dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_file() {
-                        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                            if name.ends_with("workspace_settings.json") {
-                                selected_config_path = Some(p);
-                                break;
+        }
+    }
+
+    // Helpers for metadata stored under `extensions.open_space_mmo.managed_settings`
+    fn read_managed_settings_map(
+        ext_val: &Option<serde_json::Value>,
+    ) -> HashMap<String, serde_json::Value> {
+        let mut map = HashMap::new();
+        if let Some(ext) = ext_val {
+            if let Some(obj) = ext.as_object() {
+                if let Some(osm) = obj.get("open_space_mmo") {
+                    if let Some(osm_obj) = osm.as_object() {
+                        if let Some(ms) = osm_obj.get("managed_settings") {
+                            if let Some(ms_obj) = ms.as_object() {
+                                for (k, v) in ms_obj.iter() {
+                                    map.insert(k.clone(), v.clone());
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        map
+    }
 
-        if let Some(config_path) = selected_config_path {
-            match fs::read_to_string(&config_path) {
-                Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-                    Ok(mut selected_val) => {
-                        // If the external config is a workspace file with a "settings" key,
-                        // extract the settings object to merge
-                        if selected_val.is_object() {
-                            let obj = selected_val.as_object().unwrap();
-                            if obj.contains_key("settings") && obj.get("settings").unwrap().is_object() {
-                                selected_val = obj.get("settings").unwrap().clone();
-                            }
+    fn write_managed_settings_map(
+        ext_val: &mut Option<serde_json::Value>,
+        managed: &HashMap<String, serde_json::Value>,
+    ) {
+        let mut ext_obj = ext_val
+            .as_ref()
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_else(|| Map::new());
+
+        let mut osm_obj = ext_obj
+            .get("open_space_mmo")
+            .and_then(|v| v.as_object().cloned())
+            .unwrap_or_else(|| Map::new());
+        let mut ms_obj = Map::new();
+        for (k, v) in managed.iter() {
+            ms_obj.insert(k.clone(), v.clone());
+        }
+        osm_obj.insert(
+            "managed_settings".to_string(),
+            serde_json::Value::Object(ms_obj),
+        );
+        ext_obj.insert(
+            "open_space_mmo".to_string(),
+            serde_json::Value::Object(osm_obj),
+        );
+        *ext_val = Some(serde_json::Value::Object(ext_obj));
+    }
+
+    if let Some(config_path) = selected_config_path {
+        match fs::read_to_string(&config_path) {
+            Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(mut selected_val) => {
+                    // If the external config is a workspace file with a "settings" key,
+                    // extract the settings object to merge
+                    // Pull out managed settings metadata so we can update previously added keys
+                    let mut managed_map: HashMap<String, serde_json::Value> =
+                        read_managed_settings_map(&workspace_file.extensions);
+
+                    if selected_val.is_object() {
+                        let obj = selected_val.as_object().unwrap();
+                        if obj.contains_key("settings") && obj.get("settings").unwrap().is_object()
+                        {
+                            selected_val = obj.get("settings").unwrap().clone();
                         }
+                    }
 
-                        if selected_val.is_object() {
-                            // Debug: print what we're about to merge (temporary)
-                            //eprintln!("DBG: external selected settings = {}", selected_val);
-                            if let Some(existing_settings) = workspace_file.settings.as_mut() {
-                                if existing_settings.is_object() {
-                                    let existing_map = existing_settings.as_object_mut().unwrap();
-                                    for (k, v) in selected_val.as_object().unwrap().iter() {
-                                        if !existing_map.contains_key(k) {
-                                            existing_map.insert(k.clone(), v.clone());
+                    if selected_val.is_object() {
+                        // Debug: print what we're about to merge (temporary)
+                        //eprintln!("DBG: external selected settings = {}", selected_val);
+                        if let Some(existing_settings) = workspace_file.settings.as_mut() {
+                            if existing_settings.is_object() {
+                                let existing_map = existing_settings.as_object_mut().unwrap();
+                                for (k, v) in selected_val.as_object().unwrap().iter() {
+                                    if existing_map.contains_key(k) {
+                                        // Only overwrite if this key was previously managed by open_space_mmo
+                                        // AND the current workspace value equals the previously recorded value.
+                                        if let Some(prev_val) = managed_map.get(k) {
+                                            if existing_map.get(k) == Some(prev_val) {
+                                                existing_map.insert(k.clone(), v.clone());
+                                                managed_map.insert(k.clone(), v.clone());
+                                            } else {
+                                                // User has changed this value; don't overwrite.
+                                            }
+                                        } else {
+                                            // Not managed by us, preserve user's value.
                                         }
+                                    } else {
+                                        // Insert new value and mark it managed
+                                        existing_map.insert(k.clone(), v.clone());
+                                        managed_map.insert(k.clone(), v.clone());
                                     }
-                                } else {
-                                    // Existing settings aren't an object; replace them with the external settings.
-                                    workspace_file.settings = Some(selected_val);
                                 }
                             } else {
-                                workspace_file.settings = Some(selected_val);
-                            }
-                        }
-                    }
-                    Err(parse_err) => {
-                        eprintln!("Error: failed to parse {}: {}", config_path.display(), parse_err);
-                        // If stdin is not a TTY (non-interactive), abort instead of
-                        // silently continuing.
-                        if !atty::is(Stream::Stdin) {
-                            return Err(format!("Aborted: {} is invalid JSON: {}", config_path.display(), parse_err).into());
-                        }
-                        // Prompt the user whether to continue without applying these settings.
-                        eprint!("Continue generating workspace without these settings? (y/N): ");
-                        use std::io::{self, Write};
-                        io::stdout().flush().ok();
-                        let mut input = String::new();
-                        match io::stdin().read_line(&mut input) {
-                            Ok(_) => {
-                                let ans = input.trim();
-                                if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
-                                    eprintln!("Continuing without applying open_space_mmo settings.");
-                                } else {
-                                    return Err(format!("Aborted by user due to invalid {}: {}", config_path.display(), parse_err).into());
+                                // Existing settings aren't an object; replace them with the external settings.
+                                workspace_file.settings = Some(selected_val.clone());
+                                // Replace the managed map with all keys from selected_val
+                                managed_map.clear();
+                                if selected_val.is_object() {
+                                    for (k, v) in selected_val.as_object().unwrap().iter() {
+                                        managed_map.insert(k.clone(), v.clone());
+                                    }
                                 }
                             }
-                            Err(_) => {
-                                // In interactive mode a read_line failure is unexpected;
-                                // abort to be safe.
-                                return Err(format!("Aborted: failed to read user input while handling invalid {}: {}", config_path.display(), parse_err).into());
+                        } else {
+                            workspace_file.settings = Some(selected_val.clone());
+                            if selected_val.is_object() {
+                                for (k, v) in selected_val.as_object().unwrap().iter() {
+                                    managed_map.insert(k.clone(), v.clone());
+                                }
                             }
                         }
+
+                        // Persist managed map into extensions
+                        write_managed_settings_map(&mut workspace_file.extensions, &managed_map);
                     }
-                },
-                Err(read_err) => {
-                    eprintln!("Error: failed to read {}: {}", config_path.display(), read_err);
+                }
+                Err(parse_err) => {
+                    eprintln!(
+                        "Error: failed to parse {}: {}",
+                        config_path.display(),
+                        parse_err
+                    );
+                    // If stdin is not a TTY (non-interactive), abort instead of
+                    // silently continuing.
                     if !atty::is(Stream::Stdin) {
-                        return Err(format!("Aborted: could not read {}: {}", config_path.display(), read_err).into());
+                        return Err(format!(
+                            "Aborted: {} is invalid JSON: {}",
+                            config_path.display(),
+                            parse_err
+                        )
+                        .into());
                     }
+                    // Prompt the user whether to continue without applying these settings.
                     eprint!("Continue generating workspace without these settings? (y/N): ");
                     use std::io::{self, Write};
                     io::stdout().flush().ok();
@@ -1123,16 +1379,71 @@ pub fn write_workspace_for_root(output_dir: &Path, runnables: &[Runnable], root_
                             if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
                                 eprintln!("Continuing without applying open_space_mmo settings.");
                             } else {
-                                return Err(format!("Aborted by user due to unreadable {}: {}", config_path.display(), read_err).into());
+                                return Err(format!(
+                                    "Aborted by user due to invalid {}: {}",
+                                    config_path.display(),
+                                    parse_err
+                                )
+                                .into());
                             }
                         }
                         Err(_) => {
-                            return Err(format!("Aborted: failed to read user input while handling unreadable {}: {}", config_path.display(), read_err).into());
+                            // In interactive mode a read_line failure is unexpected;
+                            // abort to be safe.
+                            return Err(format!(
+                                "Aborted: failed to read user input while handling invalid {}: {}",
+                                config_path.display(),
+                                parse_err
+                            )
+                            .into());
                         }
+                    }
+                }
+            },
+            Err(read_err) => {
+                eprintln!(
+                    "Error: failed to read {}: {}",
+                    config_path.display(),
+                    read_err
+                );
+                if !atty::is(Stream::Stdin) {
+                    return Err(format!(
+                        "Aborted: could not read {}: {}",
+                        config_path.display(),
+                        read_err
+                    )
+                    .into());
+                }
+                eprint!("Continue generating workspace without these settings? (y/N): ");
+                use std::io::{self, Write};
+                io::stdout().flush().ok();
+                let mut input = String::new();
+                match io::stdin().read_line(&mut input) {
+                    Ok(_) => {
+                        let ans = input.trim();
+                        if ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes") {
+                            eprintln!("Continuing without applying open_space_mmo settings.");
+                        } else {
+                            return Err(format!(
+                                "Aborted by user due to unreadable {}: {}",
+                                config_path.display(),
+                                read_err
+                            )
+                            .into());
+                        }
+                    }
+                    Err(_) => {
+                        return Err(format!(
+                            "Aborted: failed to read user input while handling unreadable {}: {}",
+                            config_path.display(),
+                            read_err
+                        )
+                        .into());
                     }
                 }
             }
         }
+    }
 
     let json_content = serde_json::to_string_pretty(&workspace_file)?;
     fs::write(&workspace_path, json_content)?;

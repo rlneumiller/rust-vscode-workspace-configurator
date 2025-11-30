@@ -9,11 +9,13 @@
     "[rust]": {
       "editor.semanticHighlighting.enabled": false
     },
+    "editor.formatOnSave": true,
     "editor.inlayHints.enabled": "offUnlessPressed",
     "editor.semanticHighlighting.enabled": false,
     "git.autoRepositoryDetection": false,
     "git.detectSubmodules": false,
     "git.detectSubmodulesLimit": 0,
+    "git.enableSmartCommit": false,
     "git.ignoredRepositories": [
       "./bevy_0.17.2",
       "./big_space_0.11.0",
@@ -23,6 +25,7 @@
     "git.scanRepositories": [
       "."
     ],
+    "git.smartCommitChanges": "tracked",
     "terminal.integrated.env.linux": {
       "WINIT_UNIX_BACKEND": "wayland"
     },
@@ -106,5 +109,10 @@
         ]
       }
     ]
+  },
+  "extensions": {
+    "open_space_mmo": {
+      "managed_settings": {}
+    }
   }
 }
